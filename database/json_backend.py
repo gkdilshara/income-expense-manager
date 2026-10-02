@@ -271,6 +271,34 @@ class JSONBackend:
         with self._lock:
             self._write("settings", settings.to_dict())
 
+    def wipe_transactions(self, account_id: str = None, txn_type: str = None) -> int:
+        """Delete all transactions (or filtered by account / type)."""
+        with self._lock:
+            txns = self._read("transactions")
+            new_txns = []
+            removed = 0
+            for t in txns:
+                matches_acc = (account_id is None) or (t.get("account_id") == account_id)
+                matches_type = (txn_type is None) or (t.get("type") == txn_type)
+                if matches_acc and matches_type:
+                    removed += 1
+                else:
+                    new_txns.append(t)
+            self._write("transactions", new_txns)
+            return removed
+
+    def factory_reset(self):
+        """Reset all data files back to fresh default state."""
+        with self._lock:
+            for key in ["accounts", "transactions", "income_methods", "expense_methods", "budgets", "settings"]:
+                path = self._files[key]
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
+            self._initialize_defaults()
+
     # ─── Sync / Export ────────────────────────────────────────────────────────
 
     def export_all(self) -> Dict:

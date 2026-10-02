@@ -466,6 +466,40 @@ class MySQLBackend:
         finally:
             cur.close(); conn.close()
 
+    def wipe_transactions(self, account_id: str = None, txn_type: str = None) -> int:
+        """Delete all transactions (or filtered by account / type)."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        try:
+            sql = "DELETE FROM transactions WHERE 1=1"
+            params = []
+            if account_id:
+                sql += " AND account_id=%s"
+                params.append(account_id)
+            if txn_type:
+                sql += " AND type=%s"
+                params.append(txn_type)
+            cur.execute(sql, tuple(params))
+            conn.commit()
+            return cur.rowcount
+        finally:
+            cur.close(); conn.close()
+
+    def factory_reset(self):
+        """Reset MySQL database back to default state."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute("DELETE FROM transactions")
+            cur.execute("DELETE FROM budgets")
+            cur.execute("DELETE FROM accounts")
+            cur.execute("DELETE FROM income_methods")
+            cur.execute("DELETE FROM expense_methods")
+            conn.commit()
+            self._initialize_defaults()
+        finally:
+            cur.close(); conn.close()
+
     # ─── Export ───────────────────────────────────────────────────────────────
 
     def export_all(self) -> Dict:

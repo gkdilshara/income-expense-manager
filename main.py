@@ -20,6 +20,8 @@ import charts
 from io_manager import export_transactions, import_transactions
 import ui_components as ui
 from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
 from rich import box
 
 
@@ -52,6 +54,21 @@ class Application:
         """Get currency symbol for the current active account."""
         curr = self.current_account.currency if self.current_account else config.DEFAULT_CURRENCY
         return config.CURRENCY_SYMBOLS.get(curr, curr + " ")
+
+    def get_available_categories(self, txn_type: str = "expense") -> List[str]:
+        """Aggregate default categories and any previously saved custom categories."""
+        default_cats = config.DEFAULT_INCOME_CATEGORIES if txn_type == "income" else config.DEFAULT_EXPENSE_CATEGORIES
+        txns = self.db.get_transactions(account_id=self.current_account_id, type_filter=txn_type)
+        used_cats = {t.category.strip() for t in txns if t.category and t.category.strip()}
+
+        # Merge preserving order
+        combined = [c for c in default_cats if c != "Other"]
+        for c in sorted(used_cats):
+            if c not in combined and c != "Other":
+                combined.append(c)
+        if "Other" not in combined:
+            combined.append("Other")
+        return combined
 
     def refresh_banner(self, subtitle: str = ""):
         """Print clean header banner."""
@@ -167,10 +184,10 @@ class Application:
             return
 
         # Category
-        default_cats = config.DEFAULT_INCOME_CATEGORIES if txn_type == "income" else config.DEFAULT_EXPENSE_CATEGORIES
-        cat_choices = default_cats + ["+ Enter Custom Category", "Cancel"]
+        available_cats = self.get_available_categories(txn_type)
+        cat_choices = available_cats + ["+ Enter Custom Category", "Cancel"]
         cat_pick = ui.prompt_menu("Select Category:", cat_choices)
-        
+
         if cat_pick == "Cancel" or cat_pick == "BACK":
             return
         elif cat_pick.startswith("+"):
@@ -321,8 +338,8 @@ class Application:
                 txns = self.db.get_transactions(account_id=self.current_account_id, date_from=d_from[:10], date_to=d_to[:10])
                 self._display_txn_table(txns, subtitle=f"Date Range: {d_from} to {d_to}")
             elif choice.startswith("4."):
-                cats = config.DEFAULT_EXPENSE_CATEGORIES + config.DEFAULT_INCOME_CATEGORIES
-                cat_pick = ui.prompt_menu("Select Category to Filter:", cats + ["Back"])
+                all_cats = sorted(set(self.get_available_categories("expense") + self.get_available_categories("income")))
+                cat_pick = ui.prompt_menu("Select Category to Filter:", all_cats + ["Back"])
                 if cat_pick != "Back" and cat_pick != "BACK":
                     txns = self.db.get_transactions(account_id=self.current_account_id, category=cat_pick)
                     self._display_txn_table(txns, subtitle=f"Category: {cat_pick}")
@@ -382,32 +399,67 @@ class Application:
         ui.pause()
 
     def _delete_transaction_flow(self):
-        """Interactive transaction deletion."""
-        txns = self.db.get_transactions(account_id=self.current_account_id)[:15]
+        """Interactive transaction deletion with specific income and expense options."""
+        self.refresh_banner("Delete Transactions")
+        sym = self.get_currency_symbol()
+
+        del_menu_choices = [
+            "1. 💰  Delete a Specific Income Transaction",
+            "2. 💸  Delete a Specific Expense Transaction",
+            "3. 📋  Delete from All Recent Transactions",
+            "4. 🧹  Delete ALL Incomes in Current Account",
+            "5. 🧹  Delete ALL Expenses in Current Account",
+            "6. ↩  Cancel"
+        ]
+        pick = ui.prompt_menu("Select Delete Operation:", del_menu_choices)
+
+        if pick.startswith("1."):
+            self._delete_single_txn_by_type("income")
+        elif pick.startswith("2."):
+            self._delete_single_txn_by_type("expense")
+        elif pick.startswith("3."):
+            self._delete_single_txn_by_type(None)
+        elif pick.startswith("4."):
+            acc_name = self.current_account.name if self.current_account else "current"
+            if ui.prompt_confirm(f"Are you sure you want to delete ALL INCOME transactions in '{acc_name}'?"):
+                count = self.db.wipe_transactions(account_id=self.current_account_id, txn_type="income")
+                ui.show_success(f"Deleted {count} income transaction(s).")
+                ui.pause()
+        elif pick.startswith("5."):
+            acc_name = self.current_account.name if self.current_account else "current"
+            if ui.prompt_confirm(f"Are you sure you want to delete ALL EXPENSE transactions in '{acc_name}'?"):
+                count = self.db.wipe_transactions(account_id=self.current_account_id, txn_type="expense")
+                ui.show_success(f"Deleted {count} expense transaction(s).")
+                ui.pause()
+
+    def _delete_single_txn_by_type(self, txn_type: Optional[str]):
+        """Pick and delete a single transaction filtered by type."""
+        sym = self.get_currency_symbol()
+        type_label = txn_type.upper() if txn_type else "ANY"
+        txns = self.db.get_transactions(account_id=self.current_account_id, type_filter=txn_type)[:25]
+
         if not txns:
-            ui.show_warning("No transactions to delete.")
+            ui.show_warning(f"No {type_label.lower()} transactions found to delete.")
             ui.pause()
             return
 
-        sym = self.get_currency_symbol()
         choices = []
         for t in txns:
             sign = "+" if t.type == "income" else "-"
             choices.append(f"{t.date[:10]} | {sign}{sym}{t.amount:,.2f} | {t.category} ({t.description[:20]}) [ID:{t.id[:8]}]")
         choices.append("Cancel")
 
-        pick = ui.prompt_menu("Select transaction to permanently delete:", choices)
-        if pick == "Cancel" or pick == "BACK":
+        item_pick = ui.prompt_menu(f"Select {type_label} transaction to delete:", choices)
+        if item_pick == "Cancel" or item_pick == "BACK":
             return
 
-        # Find matching txn
         matched = None
         for t in txns:
-            if t.id[:8] in pick:
+            if t.id[:8] in item_pick:
                 matched = t
                 break
 
-        if matched and ui.prompt_confirm(f"Are you sure you want to delete this {matched.type} transaction of {sym}{matched.amount:,.2f}?"):
+        if matched and ui.prompt_confirm(f"Permanently delete {matched.type.upper()} of {sym}{matched.amount:,.2f} in '{matched.category}'?"):
             self.db.delete_transaction(matched.id)
             ui.show_success("Transaction deleted successfully.")
             ui.pause()
@@ -596,10 +648,14 @@ class Application:
                 ui.pause()
             elif choice.startswith("2."):
                 self.refresh_banner("Set Category Budget")
-                cats = config.DEFAULT_EXPENSE_CATEGORIES + ["Cancel"]
+                cats = self.get_available_categories("expense") + ["+ Enter Custom Category", "Cancel"]
                 cat_pick = ui.prompt_menu("Select Category for Budget:", cats)
                 if cat_pick != "Cancel" and cat_pick != "BACK":
-                    amt = ui.prompt_amount(f"Monthly Budget Limit ({sym})")
+                    if cat_pick.startswith("+"):
+                        cat_pick = ui.prompt_text("Enter Custom Category Name for Budget")
+                        if not cat_pick:
+                            cat_pick = "Other"
+                    amt = ui.prompt_amount(f"Monthly Budget Limit for '{cat_pick}' ({sym})")
                     if amt > 0:
                         b = Budget(account_id=self.current_account_id, category=cat_pick, amount=amt, period="monthly")
                         self.db.save_budget(b)
@@ -641,36 +697,44 @@ class Application:
 
             if choice.startswith("1."):
                 accounts = self.db.get_accounts()
-                acc_choices = [f"{'✔ ' if a.id == self.current_account_id else '  '}{a.name} ({a.currency})" for a in accounts] + ["Cancel"]
+                acc_choices = [f"{'✔ ' if a.id == self.current_account_id else '  '}{a.name} ({a.currency}) [ID:{a.id[:8]}]" for a in accounts] + ["Cancel"]
                 pick = ui.prompt_menu("Select Account to Activate:", acc_choices)
                 if pick != "Cancel" and pick != "BACK":
                     for a in accounts:
-                        if a.name in pick:
+                        if a.id[:8] in pick:
                             self.current_account = a
                             self.current_account_id = a.id
-                            ui.show_success(f"Switched to account: '{a.name}'")
+                            # Persist active account to settings
+                            settings = self.db.get_settings()
+                            settings.default_account_id = a.id
+                            self.db.save_settings(settings)
+                            ui.show_success(f"Switched active account to: '{a.name}' ({a.currency})")
                             break
                     ui.pause()
             elif choice.startswith("2."):
                 self.refresh_banner("Create New Account")
-                name = ui.prompt_text("Account Name (e.g. Business, Savings)")
+                name = ui.prompt_text("Account Name (e.g. Business, Savings, Crypto)")
                 if name:
-                    curr = ui.prompt_text("Currency Code (e.g. USD, EUR, GBP, LKR)", default="USD").upper()
+                    curr = ui.prompt_text("Currency Code (e.g. USD, EUR, GBP, LKR, AUD)", default="USD").upper()
                     desc = ui.prompt_text("Description (Optional)", default="")
                     acc = Account(name=name, currency=curr, description=desc)
                     self.db.save_account(acc)
                     if ui.prompt_confirm("Switch to this new account now?"):
                         self.current_account = acc
                         self.current_account_id = acc.id
-                    ui.show_success(f"Account '{name}' created.")
+                        settings = self.db.get_settings()
+                        settings.default_account_id = acc.id
+                        self.db.save_settings(settings)
+                    ui.show_success(f"Account '{name}' created successfully.")
                     ui.pause()
             elif choice.startswith("3."):
                 self.refresh_banner("Accounts Directory")
                 accounts = self.db.get_accounts()
                 table = Table(box=box.ROUNDED, expand=True, border_style="cyan")
-                table.add_column("Active", justify="center", width=8)
+                table.add_column("Status", justify="center", width=10)
                 table.add_column("Account Name", style="bold white", ratio=1)
                 table.add_column("Currency", justify="center", width=10)
+                table.add_column("Transactions", justify="center", width=14)
                 table.add_column("Net Balance", justify="right", width=18)
 
                 for a in accounts:
@@ -680,9 +744,10 @@ class Application:
                     net_c = "green" if net >= 0 else "red"
                     sym = config.CURRENCY_SYMBOLS.get(a.currency, a.currency + " ")
                     table.add_row(
-                        "✔ ACTIVE" if is_act else "—",
+                        "[bold green]✔ ACTIVE[/bold green]" if is_act else "[dim]—[/dim]",
                         a.name,
                         a.currency,
+                        str(len(txns)),
                         f"[{net_c}]{sym}{net:+,.2f}[/{net_c}]"
                     )
                 ui.console.print(table)
@@ -693,11 +758,11 @@ class Application:
                     ui.show_warning("Cannot delete the only remaining account.")
                     ui.pause()
                 else:
-                    del_choices = [a.name for a in accounts if a.id != self.current_account_id] + ["Cancel"]
+                    del_choices = [f"{a.name} ({a.currency}) [ID:{a.id[:8]}]" for a in accounts if a.id != self.current_account_id] + ["Cancel"]
                     pick = ui.prompt_menu("Select Account to Delete (All its transactions will be deleted!):", del_choices)
                     if pick != "Cancel" and pick != "BACK":
                         for a in accounts:
-                            if a.name == pick and ui.prompt_confirm(f"Permanently delete '{a.name}' and all its data?"):
+                            if a.id[:8] in pick and ui.prompt_confirm(f"Permanently delete '{a.name}' and all its data?"):
                                 self.db.delete_account(a.id)
                                 ui.show_success(f"Account '{a.name}' deleted.")
                                 break
@@ -785,7 +850,8 @@ class Application:
                 "2. 🔧  Configure MySQL Credentials",
                 f"3. 💱  Set Default Currency (Current: {settings.default_currency})",
                 f"4. 🔄  Auto-Sync Toggle (Current: {'ON' if settings.auto_sync else 'OFF'})",
-                "5. ↩  Back to Main Menu"
+                "5. 🧨  Wipe Data / Factory Reset",
+                "6. ↩  Back to Main Menu"
             ]
             choice = ui.prompt_menu("Settings Options:", choices)
 
@@ -828,8 +894,49 @@ class Application:
                 self.db.save_settings(settings)
                 ui.show_success(f"Auto-Sync is now: {'ENABLED' if settings.auto_sync else 'DISABLED'}")
                 ui.pause()
+            elif choice.startswith("5."):
+                self._wipe_data_flow()
             else:
                 break
+
+    def _wipe_data_flow(self):
+        """Interactive data wipe and factory reset workflow."""
+        self.refresh_banner("Wipe Data / Factory Reset")
+        ui.console.print("  [bold red]⚠️  WARNING: Data wipe operations are irreversible![/bold red]\n")
+
+        wipe_choices = [
+            "1. 🗑️  Wipe Transactions in Current Account Only",
+            "2. 🧹  Wipe All Transactions Across All Accounts",
+            "3. 🧨  Full Factory Reset (Wipe All Data & Restore Defaults)",
+            "4. ↩  Cancel"
+        ]
+        pick = ui.prompt_menu("Select Wipe Scope:", wipe_choices)
+
+        if pick.startswith("1."):
+            acc_name = self.current_account.name if self.current_account else "current"
+            if ui.prompt_confirm(f"Are you SURE you want to delete all transactions in '{acc_name}'?"):
+                count = self.db.wipe_transactions(account_id=self.current_account_id)
+                ui.show_success(f"Wiped {count} transaction(s) in account '{acc_name}'.")
+                ui.pause()
+        elif pick.startswith("2."):
+            confirm_text = ui.prompt_text("Type 'WIPE' to confirm deleting ALL transactions across all accounts")
+            if confirm_text.strip().upper() == "WIPE":
+                count = self.db.wipe_transactions()
+                ui.show_success(f"Successfully wiped all {count} transactions.")
+                ui.pause()
+            else:
+                ui.show_info("Operation cancelled. Confirmation text did not match.")
+                ui.pause()
+        elif pick.startswith("3."):
+            confirm_text = ui.prompt_text("Type 'RESET' to confirm FULL FACTORY RESET (wipes all accounts, transactions, budgets)")
+            if confirm_text.strip().upper() == "RESET":
+                self.db.factory_reset()
+                self.init()
+                ui.show_success("Factory reset complete! System restored to fresh default state.")
+                ui.pause()
+            else:
+                ui.show_info("Factory reset cancelled. Confirmation text did not match.")
+                ui.pause()
 
     # ─── 11. About & Credits ──────────────────────────────────────────────────
 
