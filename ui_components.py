@@ -120,7 +120,8 @@ def show_warning(msg: str):
 
 def pause(prompt: str = "Press Enter or ESC to go back..."):
     """Clean pause prompt supporting Enter, Space, and ESC."""
-    console.print(f"\n  [dim]{prompt}[/dim]", end="", flush=True)
+    console.print(f"\n  [dim]{prompt}[/dim]", end="")
+    sys.stdout.flush()
     try:
         if os.name == 'nt':
             import msvcrt
